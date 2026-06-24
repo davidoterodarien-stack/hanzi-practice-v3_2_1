@@ -1317,57 +1317,29 @@ function NameModal({ onSave }) {
   );
 }
 
-// ----------------- LoginGate: nombre + email (sin código, sin magia) -----------------
-function LoginGate() {
-  const [name,    setName]    = useState('');
-  const [email,   setEmail]   = useState('');
-  const [err,     setErr]     = useState('');
-  const [loading, setLoading] = useState(false);
+// ----------------- LoginGate: nombre + email → localStorage, sin auth -----------------
+function LoginGate({ onLogin }) {
+  const [name,  setName]  = useState('');
+  const [email, setEmail] = useState('');
+  const [err,   setErr]   = useState('');
 
-  // Contraseña determinista desde el email — el alumno nunca la ve
-  const mkPwd = (em) => btoa(em.toLowerCase().trim() + ':hanzi-practice-2026')
-    .replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+  // UUID determinista a partir del email para que el mismo alumno
+  // tenga el mismo ID en cualquier dispositivo donde ingrese su email.
+  const emailToId = (em) => {
+    const s = btoa(unescape(encodeURIComponent(em + ':hanzi2026')));
+    const h = s.replace(/[^a-zA-Z0-9]/g, '').padEnd(32, '0');
+    return h.slice(0,8)+'-'+h.slice(8,12)+'-4'+h.slice(12,15)+'-8'+h.slice(15,18)+'-'+h.slice(18,30);
+  };
 
-  const handleSubmit = async (ev) => {
+  const handleSubmit = (ev) => {
     ev.preventDefault();
     if (!name.trim())         { setErr('Ingresá tu nombre.');       return; }
     if (!email.includes('@')) { setErr('Ingresá un email válido.'); return; }
-    setLoading(true); setErr('');
     const em = email.trim().toLowerCase();
-    const pw = mkPwd(em);
-
-    // Intentar login; si no existe la cuenta, crearla y volver a loguear
-    let { error: signInErr } = await db.auth.signInWithPassword({ email: em, password: pw });
-    if (signInErr) {
-      const { data: signUpData, error: signUpErr } = await db.auth.signUp({ email: em, password: pw });
-      if (signUpErr) {
-        // Rate limit o email ya registrado con otra contraseña
-        if (signUpErr.message.toLowerCase().includes('security') || signUpErr.message.toLowerCase().includes('rate')) {
-          setErr('Esperá unos segundos y volvé a intentar.');
-        } else {
-          setErr(signUpErr.message);
-        }
-        setLoading(false); return;
-      }
-      // Si el signup requiere confirmación de email, avisamos
-      if (signUpData.user && !signUpData.session) {
-        setErr('⚠️ Hay que desactivar "Confirm email" en Supabase Auth → Sign In / Providers → Email para que funcione sin confirmación.');
-        setLoading(false); return;
-      }
-      // Segundo intento de login para obtener la sesión
-      const { error: e2 } = await db.auth.signInWithPassword({ email: em, password: pw });
-      if (e2) { setErr(e2.message); setLoading(false); return; }
-    }
-
-    // Guardar / actualizar nombre en el perfil
-    const { data: { user } } = await db.auth.getUser();
-    if (user) {
-      await db.from('profiles').upsert(
-        { id: user.id, email: em, name: name.trim(), role: 'alumno' },
-        { onConflict: 'id' }
-      );
-    }
-    setLoading(false);
+    const id = emailToId(em);
+    const today = new Date().toISOString().slice(0, 10);
+    const studentData = { id, name: name.trim(), email: em, streak_days: 1, streak_last_date: today };
+    onLogin(studentData);
   };
 
   return html('div', { className: 'name-modal-overlay' },
@@ -1848,73 +1820,40 @@ function App() {
       }
     });
   }, []);
-  // --- Autenticación del alumno (Supabase Auth + tabla profiles) ---
-  const [session, setSession] = useState(undefined); // undefined = cargando sesión
-  const [profile, setProfile] = useState(undefined); // undefined = cargando perfil, null = falta nombre
+  // --- Identidad del alumno: localStorage puro, sin Supabase Auth ---
+  const [student, setStudent] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('hanzi_student') || 'null'); } catch { return null; }
+  });
 
-  useEffect(() => {
-    db.auth.getSession().then(({ data }) => setSession(data.session || null));
-    const { data: listener } = db.auth.onAuthStateChange((_e, s) => setSession(s));
-    return () => listener.subscription.unsubscribe();
-  }, []);
+  const studentId   = student ? student.id   : null;
+  const playerName  = student ? student.name : '';
+  // "profile" simulado para compatibilidad con el resto del código
+  const profile = student ? { id: student.id, name: student.name, email: student.email, role: 'alumno',
+    streak_days: student.streak_days || 0, streak_last_date: student.streak_last_date } : null;
 
-  useEffect(() => {
-    if (!session) { setProfile(undefined); return; }
-    setProfile(undefined);
-    db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date').eq('id', session.user.id).maybeSingle()
-      .then(({ data }) => setProfile(data || null));
-  }, [session]);
-
-  const studentId = session && session.user ? session.user.id : null;
-  const playerName = profile && profile.name ? profile.name : '';
-
-  const handleSignOut = async () => {
-    await db.auth.signOut();
-    setSession(null);
-    setProfile(undefined);
+  const saveStudent = (data) => {
+    localStorage.setItem('hanzi_student', JSON.stringify(data));
+    setStudent(data);
   };
 
-  // ── Estado extra: clase, tareas y errores de palabras ──
-  const [studentClassId, setStudentClassId] = useState(null);
-  const [assignments, setAssignments] = useState([]);
+  const handleSignOut = () => {
+    localStorage.removeItem('hanzi_student');
+    setStudent(null);
+  };
+
+  // Racha local: se calcula al iniciar si el alumno ya está logueado
+  useEffect(() => {
+    if (!student) return;
+    const today     = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (student.streak_last_date === today) return;
+    const newStreak = student.streak_last_date === yesterday ? (student.streak_days || 0) + 1 : 1;
+    saveStudent({ ...student, streak_days: newStreak, streak_last_date: today });
+  }, []); // solo al montar
+
+  // ── Estado extra ──
+  const [assignments,  setAssignments]  = useState([]);
   const [wordErrorsMap, setWordErrorsMap] = useState({});
-
-  // Actualizar racha y last_seen en Supabase al entrar
-  useEffect(() => {
-    if (!studentId) return;
-    db.rpc('update_streak').then(({ error }) => {
-      if (!error) {
-        db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date')
-          .eq('id', studentId).maybeSingle()
-          .then(({ data }) => { if (data) setProfile(data); });
-      }
-    });
-  }, [studentId]);
-
-  // Cargar clase, tareas asignadas y mapa de errores por palabra
-  useEffect(() => {
-    if (!studentId) { setStudentClassId(null); setAssignments([]); setWordErrorsMap({}); return; }
-    db.from('class_members').select('class_id').eq('student_id', studentId).maybeSingle()
-      .then(({ data }) => {
-        if (data && data.class_id) {
-          setStudentClassId(data.class_id);
-          const today = new Date().toISOString().slice(0, 10);
-          db.from('assignments').select('id,title,description,lesson_ids,due_date')
-            .eq('class_id', data.class_id).gte('due_date', today)
-            .order('due_date').limit(3)
-            .then(({ data: asgn }) => setAssignments(asgn || []));
-        }
-      });
-    db.from('word_errors').select('hanzi,error_count,last_error,last_correct')
-      .eq('student_id', studentId)
-      .then(({ data }) => {
-        if (data) {
-          const map = {};
-          data.forEach(e => { map[e.hanzi] = e; });
-          setWordErrorsMap(map);
-        }
-      });
-  }, [studentId]);
 
   // --- Progreso: al loguearse, traer de Supabase y fusionar con la copia local ---
   useEffect(() => {
@@ -2098,17 +2037,9 @@ function App() {
     }
   }
 
-  // Cargando sesión, o cargando perfil tras un login exitoso
-  if (session === undefined || (session && profile === undefined)) {
-    return html('div', { className: 'app' });
-  }
-  // Sin sesión: pedir mail
-  if (!session) {
-    return html('div', { className: 'app' }, html(LoginGate, {}));
-  }
-  // Con sesión pero el perfil todavía no se cargó de Supabase (raro pero posible)
-  if (!profile) {
-    return html('div', { className: 'app' }, html(LoginGate, {}));
+  // Sin alumno identificado → mostrar formulario de nombre/email
+  if (!student) {
+    return html('div', { className: 'app' }, html(LoginGate, { onLogin: saveStudent }));
   }
 
   return html('div', { className: 'app' }, content);
@@ -4155,7 +4086,7 @@ function OrdenGame({ onBack, onFinish, playerName }) {
 const root = createRoot(document.getElementById('root'));
 root.render(html(App));
 </script>
-<div style="position:fixed;bottom:6px;right:10px;font-size:10px;color:#bbb;pointer-events:none;user-select:none;z-index:9999">v1.2.2</div>
+<div style="position:fixed;bottom:6px;right:10px;font-size:10px;color:#bbb;pointer-events:none;user-select:none;z-index:9999">v1.2.3</div>
 <!-- © 2026 大卫 · dawei.com.ar -->
 </body>
 </html>
