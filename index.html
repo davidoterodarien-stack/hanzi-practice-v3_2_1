@@ -713,8 +713,8 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script>
-const SUPABASE_URL = 'https://pwqwlfrlaxnybnkdauvk.supabase.co';
-const SUPABASE_KEY = 'sb_publishable__0T0_tkgiEdgUGtwMoSHjA_xRd8btWE';
+const SUPABASE_URL = 'https://ovdtbbqnnarjuhxknpkf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_6bCjiYj2fqjylV6_apj86g_0xbWF_Mr';
 const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 </script>
 <script>
@@ -1317,6 +1317,101 @@ function NameModal({ onSave }) {
   );
 }
 
+// ----------------- LoginGate: acceso del alumno por mail -----------------
+function LoginGate() {
+  const [email, setEmail] = useState('');
+  const [sent, setSent] = useState(false);
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setErr(null);
+    setLoading(true);
+    const { error } = await db.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.href },
+    });
+    setLoading(false);
+    if (error) setErr(error.message);
+    else setSent(true);
+  };
+
+  return html('div', { className: 'name-modal-overlay' },
+    html('div', { className: 'name-modal' },
+      html('div', { className: 'name-modal-hanzi hanzi-font' }, '你好！'),
+      html('h2', { className: 'name-modal-title' }, sent ? '📩 Revisá tu correo' : 'Ingresá con tu mail'),
+      sent
+        ? html(React.Fragment, null,
+            html('p', { className: 'name-modal-sub' }, 'Te enviamos un enlace a ' + email + '. Abrilo desde este mismo dispositivo para entrar a la app.'),
+            html('button', {
+              className: 'secondary-btn', style: { width: '100%', marginTop: 8 },
+              onClick: () => { setSent(false); setEmail(''); },
+            }, 'Usar otro mail'),
+          )
+        : html(React.Fragment, null,
+            html('p', { className: 'name-modal-sub' }, 'Así tu laoshi puede ver tu avance y avisarte por mail.'),
+            html('form', { onSubmit: handleSubmit },
+              html('input', {
+                className: 'name-modal-input', type: 'email', placeholder: 'tu@mail.com',
+                value: email, autoFocus: true, required: true,
+                onChange: (e) => setEmail(e.target.value),
+              }),
+              err && html('div', { style: { color: 'var(--lacquer-dark)', fontSize: 13, fontWeight: 700, marginTop: 6 } }, err),
+              html('button', {
+                className: 'primary-btn', type: 'submit', disabled: !email.trim() || loading,
+                style: { width: '100%', marginTop: 8 },
+              }, loading ? 'Enviando...' : 'Enviarme el enlace →'),
+            ),
+          ),
+    ),
+  );
+}
+
+// ----------------- EnrollForm: nombre + código de clase -----------------
+function EnrollForm({ onEnrolled }) {
+  const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setErr(null);
+    setLoading(true);
+    const { error } = await db.rpc('redeem_class_code', { p_code: code.trim(), p_name: name.trim() });
+    setLoading(false);
+    if (error) { setErr(error.message); return; }
+    onEnrolled();
+  };
+
+  return html('div', { className: 'name-modal-overlay' },
+    html('div', { className: 'name-modal' },
+      html('div', { className: 'name-modal-hanzi hanzi-font' }, '你好！'),
+      html('h2', { className: 'name-modal-title' }, '¿Cómo te llamás?'),
+      html('p', { className: 'name-modal-sub' }, 'Pedile a tu laoshi el código de tu clase para activar tu cuenta.'),
+      html('form', { onSubmit: handleSubmit },
+        html('input', {
+          className: 'name-modal-input', type: 'text', placeholder: 'Tu nombre...',
+          value: name, autoFocus: true, maxLength: 30, required: true,
+          onChange: (e) => setName(e.target.value),
+        }),
+        html('input', {
+          className: 'name-modal-input', type: 'text', placeholder: 'Código de tu clase',
+          value: code, maxLength: 12, required: true,
+          style: { marginTop: 10, textTransform: 'uppercase' },
+          onChange: (e) => setCode(e.target.value.toUpperCase()),
+        }),
+        err && html('div', { style: { color: 'var(--lacquer-dark)', fontSize: 13, fontWeight: 700, marginTop: 6 } }, err),
+        html('button', {
+          className: 'primary-btn', type: 'submit', disabled: !name.trim() || !code.trim() || loading,
+          style: { width: '100%', marginTop: 10 },
+        }, loading ? 'Activando...' : '¡Comenzar! →'),
+      ),
+    ),
+  );
+}
+
 // ----------------- App -----------------
 function App() {
   const [vocab, setVocab] = useState(loadVocab);
@@ -1341,7 +1436,57 @@ function App() {
       }
     });
   }, []);
-  const [playerName, setPlayerName] = useState(() => localStorage.getItem(NAME_KEY) || '');
+  // --- Autenticación del alumno (Supabase Auth + tabla profiles) ---
+  const [session, setSession] = useState(undefined); // undefined = cargando sesión
+  const [profile, setProfile] = useState(undefined); // undefined = cargando perfil, null = falta nombre
+
+  useEffect(() => {
+    db.auth.getSession().then(({ data }) => setSession(data.session || null));
+    const { data: listener } = db.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(undefined); return; }
+    setProfile(undefined);
+    db.from('profiles').select('id,email,name,role').eq('id', session.user.id).maybeSingle()
+      .then(({ data }) => setProfile(data || null));
+  }, [session]);
+
+  const studentId = session && session.user ? session.user.id : null;
+  const playerName = profile && profile.name ? profile.name : '';
+
+  const handleSignOut = async () => {
+    await db.auth.signOut();
+    setSession(null);
+    setProfile(undefined);
+  };
+
+  // --- Progreso: al loguearse, traer de Supabase y fusionar con la copia local ---
+  useEffect(() => {
+    if (!studentId) return;
+    Promise.all([
+      db.from('progress').select('lesson_id,mode,percent,missed').eq('student_id', studentId),
+      db.from('prueba_progress').select('game,percent,missed').eq('student_id', studentId),
+    ]).then(([lessonsRes, pruebaRes]) => {
+      setProgress(prev => {
+        const next = { lessons: { ...prev.lessons }, prueba: { ...(prev.prueba || {}) } };
+        (lessonsRes.data || []).forEach(r => {
+          const cur = next.lessons[r.lesson_id] || {};
+          next.lessons[r.lesson_id] = {
+            ...cur,
+            [r.mode]: Math.max(cur[r.mode] || 0, r.percent),
+            [r.mode + '_missed']: (r.missed && r.missed.length) ? r.missed : (cur[r.mode + '_missed'] || []),
+          };
+        });
+        (pruebaRes.data || []).forEach(r => {
+          next.prueba[r.game] = Math.max(next.prueba[r.game] || 0, r.percent);
+          next.prueba[r.game + '_missed'] = (r.missed && r.missed.length) ? r.missed : (next.prueba[r.game + '_missed'] || []);
+        });
+        return next;
+      });
+    });
+  }, [studentId]);
 
   useEffect(() => { saveProgress(progress); }, [progress]);
 
@@ -1353,12 +1498,20 @@ function App() {
       const current = next.lessons[lessonId] || {};
       const prevBest = current[mode] || 0;
       const missedKey = mode + '_missed';
+      const newPercent = Math.max(prevBest, percent);
       // Always overwrite missed list with latest run (most recent attempt)
       next.lessons[lessonId] = {
         ...current,
-        [mode]: Math.max(prevBest, percent),
+        [mode]: newPercent,
         [missedKey]: missed || [],
       };
+      if (studentId) {
+        db.from('progress').upsert({
+          student_id: studentId, lesson_id: lessonId, mode,
+          percent: newPercent, missed: missed || [],
+          updated_at: new Date().toISOString(),
+        }).then(() => {});
+      }
       return next;
     });
   };
@@ -1395,7 +1548,7 @@ function App() {
       onRefuerzo: () => setScreen({ name: 'refuerzo' }),
       onDownload: () => downloadResumen(vocab, progress, lessons, playerName),
       playerName,
-      onChangeName: () => { localStorage.removeItem(NAME_KEY); setPlayerName(''); },
+      onChangeName: handleSignOut,
     });
   } else if (screen.name === 'lesson') {
     content = html(LessonMenu, {
@@ -1448,11 +1601,19 @@ function App() {
     const onPruebaFinish = (percent, missed) => {
       setProgress(prev => {
         const pp = prev.prueba || {};
+        const newPercent = Math.max(pp[screen.game] || 0, percent);
         const next = { ...prev, prueba: {
           ...pp,
-          [screen.game]: Math.max(pp[screen.game] || 0, percent),
+          [screen.game]: newPercent,
           [screen.game + '_missed']: missed || [],
         }};
+        if (studentId) {
+          db.from('prueba_progress').upsert({
+            student_id: studentId, game: screen.game,
+            percent: newPercent, missed: missed || [],
+            updated_at: new Date().toISOString(),
+          }).then(() => {});
+        }
         return next;
       });
     };
@@ -1466,15 +1627,25 @@ function App() {
     }
   }
 
-  const handleSaveName = (name) => {
-    localStorage.setItem(NAME_KEY, name);
-    setPlayerName(name);
-  };
+  // Cargando sesión, o cargando perfil tras un login exitoso
+  if (session === undefined || (session && profile === undefined)) {
+    return html('div', { className: 'app' });
+  }
+  // Sin sesión: pedir mail
+  if (!session) {
+    return html('div', { className: 'app' }, html(LoginGate, {}));
+  }
+  // Con sesión pero sin perfil todavía: pedir nombre + código de clase
+  if (!profile) {
+    return html('div', { className: 'app' }, html(EnrollForm, {
+      onEnrolled: () => {
+        db.from('profiles').select('id,email,name,role').eq('id', studentId).maybeSingle()
+          .then(({ data }) => setProfile(data || null));
+      },
+    }));
+  }
 
-  return html('div', { className: 'app' },
-    !playerName && html(NameModal, { onSave: handleSaveName }),
-    playerName && content,
-  );
+  return html('div', { className: 'app' }, content);
 }
 
 // ----------------- Home -----------------
@@ -1492,7 +1663,7 @@ function Home({ vocab, lessons, progress, totalWords, totalStars, onSelectLesson
     ),
     playerName && html('div', { className: 'greeting-bar' },
       html('span', null, '👋 ¡Hola, ', html('strong', null, playerName), '!'),
-      html('button', { className: 'change-name-btn', onClick: onChangeName, title: 'Cambiar nombre' }, '✏️'),
+      html('button', { className: 'change-name-btn', onClick: onChangeName, title: 'Cerrar sesión' }, '🚪'),
     ),
     html('main', null,
       html('div', { className: 'score-strip' },
@@ -2441,9 +2612,23 @@ function supabaseRowsToVocab(rows) {
 function AdminPanel({ vocab, onBack, onVocabUpdate }) {
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
+  const [role, setRole] = useState(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loginStatus, setLoginStatus] = useState(null);
+
+  // El rol (admin / laoshi / alumno) decide qué puede ver cada quien.
+  // Importante: ahora que los alumnos también tienen sesión real (mail),
+  // NO alcanza con "hay sesión" para mostrar el panel — hay que chequear el rol.
+  useEffect(() => {
+    if (!session) { setRole(null); return; }
+    db.from('profiles').select('role').eq('id', session.user.id).maybeSingle()
+      .then(({ data }) => setRole(data ? data.role : null));
+  }, [session]);
+  const isAdmin = role === 'admin';
+  const isLaoshi = role === 'laoshi' || isAdmin;
+
+  useEffect(() => { if (isLaoshi) loadClasses(); }, [isLaoshi]);
 
   // texto manual (modo legacy)
   const [text, setText] = useState('');
@@ -2460,6 +2645,78 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
   // editor de contenido de lección
   const [editingLesson, setEditingLesson] = useState(null);
   const [editWords, setEditWords] = useState([]);
+
+  // ── Mis clases (clases del laoshi: código + listado de mails) ──
+  const [classes, setClasses] = useState([]);
+  const [loadingClasses, setLoadingClasses] = useState(false);
+  const [newClassName, setNewClassName] = useState('');
+  const [rosterDrafts, setRosterDrafts] = useState({}); // { [classId]: 'texto del textarea' }
+  const [rosterCounts, setRosterCounts] = useState({}); // { [classId]: n }
+  const [memberCounts, setMemberCounts] = useState({}); // { [classId]: n }
+  const [classStatus, setClassStatus] = useState(null);
+
+  const genClassCode = () => {
+    const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sin 0/O/1/I para evitar confusiones
+    let c = '';
+    for (let i = 0; i < 6; i++) c += chars[Math.floor(Math.random() * chars.length)];
+    return c;
+  };
+
+  const loadClasses = async () => {
+    setLoadingClasses(true);
+    const { data } = await db.from('classes').select('id,name,code,created_at').order('created_at', { ascending: false });
+    setClasses(data || []);
+    setLoadingClasses(false);
+    (data || []).forEach(async (c) => {
+      const [{ count: rCount }, { count: mCount }] = await Promise.all([
+        db.from('class_roster').select('email', { count: 'exact', head: true }).eq('class_id', c.id),
+        db.from('class_members').select('student_id', { count: 'exact', head: true }).eq('class_id', c.id),
+      ]);
+      setRosterCounts(prev => ({ ...prev, [c.id]: rCount || 0 }));
+      setMemberCounts(prev => ({ ...prev, [c.id]: mCount || 0 }));
+    });
+  };
+
+  const handleCreateClass = async (e) => {
+    e.preventDefault();
+    const name = newClassName.trim();
+    if (!name) return;
+    const { error } = await db.from('classes').insert({ name, code: genClassCode(), laoshi_id: session.user.id });
+    if (error) { setClassStatus({ type: 'err', msg: '❌ ' + error.message }); return; }
+    setNewClassName('');
+    setClassStatus({ type: 'ok', msg: '✅ Clase creada.' });
+    loadClasses();
+  };
+
+  const handleAddRoster = async (classId) => {
+    const raw = rosterDrafts[classId] || '';
+    const emails = raw.split(/[\n,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (emails.length === 0) return;
+    const rows = emails.map(email => ({ class_id: classId, email }));
+    const { error } = await db.from('class_roster').upsert(rows, { onConflict: 'class_id,email' });
+    if (error) { setClassStatus({ type: 'err', msg: '❌ ' + error.message }); return; }
+    setRosterDrafts(prev => ({ ...prev, [classId]: '' }));
+    setClassStatus({ type: 'ok', msg: '✅ Se agregaron ' + emails.length + ' mail(s) a la clase.' });
+    loadClasses();
+  };
+
+  // log de inicios de sesión (admins)
+  const [loginLog, setLoginLog] = useState([]);
+  const [showLoginLog, setShowLoginLog] = useState(false);
+  const loadLoginLog = () => {
+    db.from('login_log').select('email,created_at').order('created_at', { ascending: false }).limit(50)
+      .then(({ data }) => setLoginLog(data || []));
+    setShowLoginLog(true);
+  };
+
+  // log de alumnos conectados
+  const [studentLog, setStudentLog] = useState([]);
+  const [showStudentLog, setShowStudentLog] = useState(false);
+  const loadStudentLog = () => {
+    db.from('student_log').select('name,created_at').order('created_at', { ascending: false }).limit(100)
+      .then(({ data }) => setStudentLog(data || []));
+    setShowStudentLog(true);
+  };
 
   const handleRenameLesson = (id) => {
     const theme = LESSON_THEMES[id] || { name: 'Lección ' + id };
@@ -2495,8 +2752,9 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginStatus(null);
-    const { error } = await db.auth.signInWithPassword({ email, password });
-    if (error) setLoginStatus({ type: 'err', msg: error.message });
+    const { data, error } = await db.auth.signInWithPassword({ email, password });
+    if (error) { setLoginStatus({ type: 'err', msg: error.message }); return; }
+    db.from('login_log').insert({ email: data.user?.email || email }).then(() => {});
   };
 
   const handleLogout = async () => {
@@ -2729,15 +2987,68 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
         )
       ),
 
-      // ── Panel admin (solo si hay sesión) ──
-      session
+      // ── Panel admin/laoshi (según rol del perfil, no solo "hay sesión") ──
+      isLaoshi
         ? html(React.Fragment, null,
             html('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--jade-light)', borderRadius: 12, padding: '10px 14px' } },
-              html('span', { style: { fontSize: 13, fontWeight: 700, color: 'var(--jade-dark)' } }, '🔓 Admin: ' + session.user.email),
+              html('span', { style: { fontSize: 13, fontWeight: 700, color: 'var(--jade-dark)' } }, (isAdmin ? '🔓 Admin: ' : '🏫 Laoshi: ') + session.user.email),
               html('button', { className: 'secondary-btn', style: { margin: 0, padding: '6px 14px', fontSize: 13 }, onClick: handleLogout }, 'Cerrar sesión'),
             ),
 
-            // ── Nueva lección desde CSV ──
+            // ── Mis clases ──
+            html('div', null,
+              html('label', null, '🏫 Mis clases'),
+              html('p', { className: 'admin-note', style: { margin: '6px 0 10px' } },
+                'Creá una clase, compartile el código a tus alumnos y cargá de antemano los mails habilitados (solo ellos van a poder activar su cuenta con ese código).'
+              ),
+              html('form', { onSubmit: handleCreateClass, style: { display: 'flex', gap: 8, marginBottom: 14 } },
+                html('input', {
+                  value: newClassName, onChange: e => setNewClassName(e.target.value),
+                  placeholder: 'Nombre de la clase (ej: Nivel 2 - Sábados)',
+                  style: { flex: 1, padding: '10px 12px', borderRadius: 10, border: '1.5px solid var(--paper-deep)', fontSize: 14, fontFamily: 'Nunito, sans-serif' },
+                }),
+                html('button', { className: 'primary-btn', type: 'submit', style: { margin: 0, padding: '10px 16px' } }, '+ Crear'),
+              ),
+              classStatus && html('div', { className: 'admin-status ' + (classStatus.type === 'ok' ? 'ok' : 'err'), style: { marginBottom: 12 } }, classStatus.msg),
+              loadingClasses
+                ? html('p', { className: 'admin-note' }, 'Cargando clases...')
+                : classes.length === 0
+                  ? html('p', { className: 'admin-note' }, 'Todavía no creaste ninguna clase.')
+                  : html('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+                      classes.map(c => html('div', {
+                        key: c.id,
+                        style: { background: '#fff', borderRadius: 14, padding: '14px 16px', boxShadow: 'var(--shadow-paper)' },
+                      },
+                        html('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+                          html('strong', { style: { fontSize: 15 } }, c.name),
+                          html('span', {
+                            style: { fontFamily: 'monospace', fontWeight: 800, fontSize: 16, letterSpacing: 1, background: 'var(--gold-light)', padding: '4px 10px', borderRadius: 8, cursor: 'pointer' },
+                            title: 'Tocá para copiar',
+                            onClick: () => { navigator.clipboard && navigator.clipboard.writeText(c.code); setClassStatus({ type: 'ok', msg: '📋 Código ' + c.code + ' copiado.' }); },
+                          }, c.code),
+                        ),
+                        html('div', { style: { fontSize: 12, color: 'var(--ink-soft)', fontWeight: 700, marginBottom: 10 } },
+                          (rosterCounts[c.id] != null ? rosterCounts[c.id] : '…') + ' mail(s) habilitados · ' +
+                          (memberCounts[c.id] != null ? memberCounts[c.id] : '…') + ' alumno(s) activado(s)'
+                        ),
+                        html('textarea', {
+                          value: rosterDrafts[c.id] || '',
+                          onChange: e => setRosterDrafts(prev => ({ ...prev, [c.id]: e.target.value })),
+                          placeholder: 'Pegá los mails de tus alumnos (uno por línea, o separados por coma)',
+                          rows: 3,
+                          style: { width: '100%', padding: '8px 10px', borderRadius: 10, border: '1.5px solid var(--paper-deep)', fontSize: 13, fontFamily: 'Nunito, sans-serif', marginBottom: 8 },
+                        }),
+                        html('button', {
+                          className: 'secondary-btn', style: { fontSize: 13, padding: '7px 14px' },
+                          onClick: () => handleAddRoster(c.id),
+                        }, '➕ Agregar a la lista'),
+                      ))
+                    ),
+            ),
+
+            isAdmin && html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '8px 0' } }),
+
+            isAdmin && html(React.Fragment, null,
             html('div', null,
               html('label', null, '➕ Cargar lecciones desde CSV'),
               html('p', { className: 'admin-note', style: { margin: '6px 0 10px' } },
@@ -2912,6 +3223,49 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
                 })
               ),
             ),
+
+            html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '8px 0' } }),
+
+            // ── Log de inicios de sesión ──
+            html('div', null,
+              html('label', null, '🕒 Registro de inicios de sesión'),
+              html('p', { className: 'admin-note', style: { margin: '6px 0 10px' } }, 'Últimos 50 accesos al panel de administrador.'),
+              !showLoginLog
+                ? html('button', { className: 'secondary-btn', onClick: loadLoginLog }, 'Ver registro')
+                : html('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                    loginLog.length === 0
+                      ? html('p', { className: 'admin-note' }, 'Sin registros todavía.')
+                      : loginLog.map((r, i) => html('div', {
+                          key: i,
+                          style: { background: '#fff', borderRadius: 10, padding: '8px 12px', boxShadow: 'var(--shadow-paper)', display: 'flex', justifyContent: 'space-between', fontSize: 13 }
+                        },
+                          html('span', { style: { fontWeight: 700 } }, r.email),
+                          html('span', { style: { color: 'var(--ink-soft)' } }, new Date(r.created_at).toLocaleString('es-AR')),
+                        ))
+                  ),
+            ),
+
+            html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '8px 0' } }),
+
+            // ── Log de alumnos conectados ──
+            html('div', null,
+              html('label', null, '👥 Alumnos conectados'),
+              html('p', { className: 'admin-note', style: { margin: '6px 0 10px' } }, 'Registro de los nombres que los alumnos eligieron al entrar (últimos 100).'),
+              !showStudentLog
+                ? html('button', { className: 'secondary-btn', onClick: loadStudentLog }, 'Ver registro')
+                : html('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 320, overflowY: 'auto' } },
+                    studentLog.length === 0
+                      ? html('p', { className: 'admin-note' }, 'Sin registros todavía.')
+                      : studentLog.map((r, i) => html('div', {
+                          key: i,
+                          style: { background: '#fff', borderRadius: 10, padding: '8px 12px', boxShadow: 'var(--shadow-paper)', display: 'flex', justifyContent: 'space-between', fontSize: 13 }
+                        },
+                          html('span', { style: { fontWeight: 700 } }, r.name),
+                          html('span', { style: { color: 'var(--ink-soft)' } }, new Date(r.created_at).toLocaleString('es-AR')),
+                        ))
+                  ),
+            ),
+            ), // cierre isAdmin &&
           )
 
         // ── Login ──
