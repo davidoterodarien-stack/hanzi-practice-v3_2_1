@@ -1317,53 +1317,67 @@ function NameModal({ onSave }) {
   );
 }
 
-// ----------------- LoginGate: acceso del alumno por mail -----------------
+// ----------------- LoginGate: nombre + email (sin código, sin magia) -----------------
 function LoginGate() {
-  const [email, setEmail] = useState('');
-  const [sent, setSent] = useState(false);
-  const [err, setErr] = useState(null);
+  const [name,    setName]    = useState('');
+  const [email,   setEmail]   = useState('');
+  const [err,     setErr]     = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setErr(null);
-    setLoading(true);
-    const { error } = await db.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.href },
-    });
+  // Contraseña determinista desde el email — el alumno nunca la ve
+  const mkPwd = (em) => btoa(em.toLowerCase().trim() + ':hanzi-practice-2026')
+    .replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+
+  const handleSubmit = async (ev) => {
+    ev.preventDefault();
+    if (!name.trim())         { setErr('Ingresá tu nombre.');       return; }
+    if (!email.includes('@')) { setErr('Ingresá un email válido.'); return; }
+    setLoading(true); setErr('');
+    const em = email.trim().toLowerCase();
+    const pw = mkPwd(em);
+
+    // Intentar login; si no existe la cuenta, crearla y volver a loguear
+    let { error: signInErr } = await db.auth.signInWithPassword({ email: em, password: pw });
+    if (signInErr) {
+      const { error: signUpErr } = await db.auth.signUp({ email: em, password: pw });
+      if (signUpErr) { setErr(signUpErr.message); setLoading(false); return; }
+      await db.auth.signInWithPassword({ email: em, password: pw });
+    }
+
+    // Guardar / actualizar nombre en el perfil
+    const { data: { user } } = await db.auth.getUser();
+    if (user) {
+      await db.from('profiles').upsert(
+        { id: user.id, email: em, name: name.trim(), role: 'alumno' },
+        { onConflict: 'id' }
+      );
+    }
     setLoading(false);
-    if (error) setErr(error.message);
-    else setSent(true);
   };
 
   return html('div', { className: 'name-modal-overlay' },
     html('div', { className: 'name-modal' },
       html('div', { className: 'name-modal-hanzi hanzi-font' }, '你好！'),
-      html('h2', { className: 'name-modal-title' }, sent ? '📩 Revisá tu correo' : 'Ingresá con tu mail'),
-      sent
-        ? html(React.Fragment, null,
-            html('p', { className: 'name-modal-sub' }, 'Te enviamos un enlace a ' + email + '. Abrilo desde este mismo dispositivo para entrar a la app.'),
-            html('button', {
-              className: 'secondary-btn', style: { width: '100%', marginTop: 8 },
-              onClick: () => { setSent(false); setEmail(''); },
-            }, 'Usar otro mail'),
-          )
-        : html(React.Fragment, null,
-            html('p', { className: 'name-modal-sub' }, 'Así tu laoshi puede ver tu avance y avisarte por mail.'),
-            html('form', { onSubmit: handleSubmit },
-              html('input', {
-                className: 'name-modal-input', type: 'email', placeholder: 'tu@mail.com',
-                value: email, autoFocus: true, required: true,
-                onChange: (e) => setEmail(e.target.value),
-              }),
-              err && html('div', { style: { color: 'var(--lacquer-dark)', fontSize: 13, fontWeight: 700, marginTop: 6 } }, err),
-              html('button', {
-                className: 'primary-btn', type: 'submit', disabled: !email.trim() || loading,
-                style: { width: '100%', marginTop: 8 },
-              }, loading ? 'Enviando...' : 'Enviarme el enlace →'),
-            ),
-          ),
+      html('h2', { className: 'name-modal-title' }, '¿Cómo te llamás?'),
+      html('p', { className: 'name-modal-sub' }, 'Ingresá tu nombre y email para empezar. Así tu laoshi puede ver tu progreso.'),
+      html('form', { onSubmit: handleSubmit },
+        html('input', {
+          className: 'name-modal-input', type: 'text', placeholder: 'Tu nombre...',
+          value: name, autoFocus: true, maxLength: 30, required: true,
+          onChange: (e) => setName(e.target.value),
+        }),
+        html('input', {
+          className: 'name-modal-input', type: 'email', placeholder: 'tu@mail.com',
+          value: email, required: true, style: { marginTop: 10 },
+          onChange: (e) => setEmail(e.target.value),
+        }),
+        err && html('div', { style: { color: 'var(--lacquer-dark)', fontSize: 13, fontWeight: 700, marginTop: 6 } }, err),
+        html('button', {
+          className: 'primary-btn', type: 'submit',
+          disabled: !name.trim() || !email.includes('@') || loading,
+          style: { width: '100%', marginTop: 10 },
+        }, loading ? '⏳ Entrando...' : '¡Comenzar! →'),
+      ),
     ),
   );
 }
@@ -2077,14 +2091,9 @@ function App() {
   if (!session) {
     return html('div', { className: 'app' }, html(LoginGate, {}));
   }
-  // Con sesión pero sin perfil todavía: pedir nombre + código de clase
+  // Con sesión pero el perfil todavía no se cargó de Supabase (raro pero posible)
   if (!profile) {
-    return html('div', { className: 'app' }, html(EnrollForm, {
-      onEnrolled: () => {
-        db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date').eq('id', studentId).maybeSingle()
-          .then(({ data }) => setProfile(data || null));
-      },
-    }));
+    return html('div', { className: 'app' }, html(LoginGate, {}));
   }
 
   return html('div', { className: 'app' }, content);
@@ -4131,7 +4140,7 @@ function OrdenGame({ onBack, onFinish, playerName }) {
 const root = createRoot(document.getElementById('root'));
 root.render(html(App));
 </script>
-<div style="position:fixed;bottom:6px;right:10px;font-size:10px;color:#bbb;pointer-events:none;user-select:none;z-index:9999">v1.2.1</div>
+<div style="position:fixed;bottom:6px;right:10px;font-size:10px;color:#bbb;pointer-events:none;user-select:none;z-index:9999">v1.2.2</div>
 <!-- © 2026 大卫 · dawei.com.ar -->
 </body>
 </html>
