@@ -1412,6 +1412,389 @@ function EnrollForm({ onEnrolled }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Reportes: helpers y componentes
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BarChart({ items, colorFn }) {
+  const max = Math.max(...items.map(d => d.value), 1);
+  return html('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+    items.map((d, i) => html('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 10 } },
+      html('div', { style: { width: 88, fontSize: 12, fontWeight: 700, color: 'var(--ink-soft)', textAlign: 'right', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, d.label),
+      html('div', { style: { flex: 1, height: 18, background: 'var(--paper-deep)', borderRadius: 4, overflow: 'hidden' } },
+        html('div', { style: {
+          height: '100%',
+          width: Math.round(d.value / max * 100) + '%',
+          background: colorFn ? colorFn(d.value) : (d.value >= 80 ? 'var(--jade)' : d.value >= 50 ? 'var(--gold)' : 'var(--lacquer)'),
+          borderRadius: 4, transition: 'width 0.6s ease',
+        } })
+      ),
+      html('div', { style: { width: 36, fontSize: 12, fontWeight: 800, textAlign: 'right', flexShrink: 0, color: 'var(--ink)' } }, d.suffix !== undefined ? d.suffix : d.value + '%'),
+    ))
+  );
+}
+
+function LaoshiReports({ onBack }) {
+  const [classes,          setClasses]          = useState([]);
+  const [selectedClass,    setSelectedClass]    = useState(null);
+  const [students,         setStudents]         = useState([]);
+  const [classWordErrors,  setClassWordErrors]  = useState([]);
+  const [selectedStudent,  setSelectedStudent]  = useState(null);
+  const [loading,          setLoading]          = useState(false);
+  const [tab,              setTab]              = useState('overview');
+  const [newTask,          setNewTask]          = useState({ title: '', description: '', due_date: '' });
+  const [taskTab,          setTaskTab]          = useState('list');
+  const [tasks,            setTasks]            = useState([]);
+
+  useEffect(() => {
+    db.from('classes').select('id,name,code').order('created_at', { ascending: false })
+      .then(({ data }) => {
+        const list = data || [];
+        setClasses(list);
+        if (list.length > 0) setSelectedClass(list[0]);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!selectedClass) return;
+    loadClassData(selectedClass.id);
+    loadTasks(selectedClass.id);
+  }, [selectedClass]);
+
+  const loadTasks = async (classId) => {
+    const { data } = await db.from('assignments').select('id,title,description,lesson_ids,due_date,created_at')
+      .eq('class_id', classId).order('due_date', { ascending: true });
+    setTasks(data || []);
+  };
+
+  const loadClassData = async (classId) => {
+    setLoading(true); setStudents([]); setClassWordErrors([]); setSelectedStudent(null); setTab('overview');
+    try {
+      const { data: members } = await db.from('class_members').select('student_id').eq('class_id', classId);
+      if (!members || members.length === 0) { setLoading(false); return; }
+      const ids = members.map(m => m.student_id).filter(Boolean);
+
+      const [profilesRes, progressRes, errorsRes] = await Promise.all([
+        db.from('profiles').select('id,name,email,last_seen,streak_days,streak_last_date').in('id', ids),
+        db.from('progress').select('student_id,lesson_id,mode,percent,updated_at').in('student_id', ids),
+        db.from('word_errors').select('student_id,hanzi,pinyin,es,error_count,last_error').in('student_id', ids),
+      ]);
+
+      const profiles    = profilesRes.data || [];
+      const progressAll = progressRes.data || [];
+      const errorsAll   = errorsRes.data   || [];
+
+      const studentData = ids.map(sid => {
+        const profile    = profiles.find(p => p.id === sid) || { id: sid };
+        const myProgress = progressAll.filter(r => r.student_id === sid);
+        const myErrors   = errorsAll.filter(r => r.student_id === sid).sort((a, b) => b.error_count - a.error_count);
+        const lessonIds  = [...new Set(myProgress.map(r => r.lesson_id))];
+        const avgPercent = lessonIds.length === 0 ? 0 : Math.round(
+          lessonIds.reduce((acc, lid) => {
+            const best = Math.max(...myProgress.filter(r => r.lesson_id === lid).map(r => r.percent), 0);
+            return acc + best;
+          }, 0) / lessonIds.length
+        );
+        return { profile, progress: myProgress, wordErrors: myErrors, avgPercent };
+      });
+
+      // Palabras más difíciles de la clase (agregado)
+      const errorMap = {};
+      errorsAll.forEach(e => {
+        if (!errorMap[e.hanzi]) errorMap[e.hanzi] = { hanzi: e.hanzi, pinyin: e.pinyin, es: e.es, total: 0, students: 0 };
+        errorMap[e.hanzi].total    += e.error_count;
+        errorMap[e.hanzi].students += 1;
+      });
+
+      setStudents(studentData);
+      setClassWordErrors(Object.values(errorMap).sort((a, b) => b.total - a.total).slice(0, 20));
+    } catch(e) { console.error(e); }
+    setLoading(false);
+  };
+
+  const daysSince = (d) => d ? Math.floor((Date.now() - new Date(d).getTime()) / 86400000) : 999;
+  const fmtDate   = (d) => {
+    const n = daysSince(d);
+    if (n === 0) return 'Hoy'; if (n === 1) return 'Ayer'; if (n > 30) return 'Nunca'; return 'Hace ' + n + ' días';
+  };
+
+  // ── Vista individual de alumno ──────────────────────────────────────────────
+  if (selectedStudent) {
+    const s = selectedStudent;
+    const lp = {};
+    s.progress.forEach(r => { if (!lp[r.lesson_id]) lp[r.lesson_id] = {}; lp[r.lesson_id][r.mode] = r.percent; });
+    return html('main', { style: { paddingTop: 18, paddingBottom: 40 } },
+      html('div', { className: 'header-row' },
+        html('button', { className: 'back-btn', onClick: () => setSelectedStudent(null) }, '←'),
+        html('div', null,
+          html('h1', null, s.profile.name || s.profile.email || 'Alumno'),
+          html('div', { style: { fontSize: 12, color: 'var(--ink-soft)', fontWeight: 600 } },
+            '🔥 ' + (s.profile.streak_days || 0) + ' días · 📅 ' + fmtDate(s.profile.last_seen)
+          ),
+        ),
+      ),
+      html('div', { className: 'admin-panel' },
+        html('div', null,
+          html('label', null, '📚 Progreso por lección'),
+          Object.keys(lp).length === 0
+            ? html('p', { className: 'admin-note', style: { marginTop: 6 } }, 'Sin actividad registrada aún.')
+            : html('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, marginTop: 10 } },
+                Object.keys(lp).sort().map(lid =>
+                  html('div', { key: lid, style: { background: '#fff', borderRadius: 12, padding: '10px 14px', boxShadow: 'var(--shadow-paper)' } },
+                    html('div', { style: { fontWeight: 800, fontSize: 13, marginBottom: 8 } },
+                      (lid === '9' ? '🌍 Países' : lid === '10' ? '🔢 Números' : 'Lección ' + lid) +
+                      ((LESSON_THEMES[lid] && LESSON_THEMES[lid].name) ? ' · ' + LESSON_THEMES[lid].name : '')
+                    ),
+                    html(BarChart, {
+                      items: ['match','cards','quiz'].map(m => ({ label: { match:'Emparejar', cards:'Tarjetas', quiz:'Quiz' }[m], value: lp[lid][m] || 0 })),
+                    }),
+                  )
+                )
+              ),
+        ),
+        html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '14px 0' } }),
+        html('div', null,
+          html('label', null, '⚠️ Palabras que más le cuestan'),
+          s.wordErrors.length === 0
+            ? html('p', { className: 'admin-note', style: { marginTop: 6 } }, 'Sin errores registrados todavía.')
+            : html(BarChart, {
+                items: s.wordErrors.slice(0, 10).map(e => ({ label: e.hanzi + ' ' + e.pinyin, value: e.error_count, suffix: e.error_count + '×' })),
+                colorFn: v => v >= 5 ? 'var(--lacquer)' : v >= 3 ? 'var(--gold)' : 'var(--jade)',
+              }),
+        ),
+      ),
+    );
+  }
+
+  // ── Selector de tareas: formulario para crear ─────────────────────────────
+  const handleCreateTask = async () => {
+    if (!newTask.title.trim() || !selectedClass) return;
+    const { data: { user } } = await db.auth.getUser();
+    await db.from('assignments').insert({
+      class_id: selectedClass.id, laoshi_id: user.id,
+      title: newTask.title.trim(), description: newTask.description.trim(),
+      due_date: newTask.due_date || null,
+    });
+    setNewTask({ title: '', description: '', due_date: '' });
+    loadTasks(selectedClass.id);
+  };
+
+  const handleDeleteTask = async (id) => {
+    await db.from('assignments').delete().eq('id', id);
+    loadTasks(selectedClass.id);
+  };
+
+  // ── Vista principal de la clase ────────────────────────────────────────────
+  return html('main', { style: { paddingTop: 18, paddingBottom: 40 } },
+    html('div', { className: 'header-row' },
+      html('button', { className: 'back-btn', onClick: onBack }, '←'),
+      html('h1', null, '📊 Reportes'),
+    ),
+
+    classes.length === 0 && html('div', { className: 'admin-panel' },
+      html('p', { className: 'admin-note' }, 'No tenés clases creadas todavía.'),
+    ),
+
+    classes.length > 1 && html('div', { style: { padding: '0 0 14px', display: 'flex', gap: 8, flexWrap: 'wrap' } },
+      classes.map(c => html('button', {
+        key: c.id, onClick: () => setSelectedClass(c),
+        style: {
+          padding: '8px 14px', borderRadius: 10, border: '2px solid',
+          borderColor: selectedClass && selectedClass.id === c.id ? 'var(--jade)' : 'var(--paper-deep)',
+          background: selectedClass && selectedClass.id === c.id ? 'var(--jade-light)' : '#fff',
+          fontWeight: 700, fontSize: 13, cursor: 'pointer',
+        },
+      }, c.name))
+    ),
+
+    selectedClass && html('div', { className: 'admin-panel' },
+
+      // Tabs principales
+      html('div', { style: { display: 'flex', gap: 8, marginBottom: 16 } },
+        [
+          { id: 'overview', label: '👥 Alumnos' },
+          { id: 'words',    label: '⚠️ Palabras difíciles' },
+          { id: 'tasks',    label: '📋 Tareas' },
+        ].map(t => html('button', {
+          key: t.id, onClick: () => setTab(t.id),
+          style: {
+            flex: 1, padding: '9px 0', borderRadius: 10, border: '2px solid',
+            borderColor: tab === t.id ? 'var(--jade)' : 'var(--paper-deep)',
+            background: tab === t.id ? 'var(--jade-light)' : '#fff',
+            fontWeight: 800, fontSize: 12, cursor: 'pointer',
+            color: tab === t.id ? 'var(--jade-dark)' : 'var(--ink)',
+          },
+        }, t.label))
+      ),
+
+      loading && html('p', { className: 'admin-note' }, '⏳ Cargando datos...'),
+
+      // ── Tab: Alumnos ──────────────────────────────────────────────────────
+      !loading && tab === 'overview' && (
+        students.length === 0
+          ? html('p', { className: 'admin-note' }, 'No hay alumnos en esta clase todavía.')
+          : html(React.Fragment, null,
+
+              // Alertas inactividad
+              students.filter(s => daysSince(s.profile.last_seen) >= 7).length > 0 && html('div', {
+                style: { background: '#FDE8E3', borderRadius: 12, padding: '12px 14px', marginBottom: 14 }
+              },
+                html('div', { style: { fontWeight: 800, color: '#C0392B', marginBottom: 6, fontSize: 13 } }, '⚠️ Sin actividad hace 7+ días'),
+                students.filter(s => daysSince(s.profile.last_seen) >= 7).map((s, i) =>
+                  html('div', { key: i, style: { fontSize: 13, color: '#C0392B', fontWeight: 700 } },
+                    (s.profile.name || s.profile.email || 'Alumno') + ' — ' + fmtDate(s.profile.last_seen)
+                  )
+                ),
+              ),
+
+              // Lista de alumnos
+              html('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+                students.slice().sort((a, b) => daysSince(a.profile.last_seen) - daysSince(b.profile.last_seen)).map((s, i) => {
+                  const inactive = daysSince(s.profile.last_seen) >= 7;
+                  return html('button', {
+                    key: i, onClick: () => setSelectedStudent(s),
+                    style: {
+                      background: inactive ? '#FFF4F2' : '#fff',
+                      border: '2px solid ' + (inactive ? '#F1948A' : 'var(--paper-deep)'),
+                      borderRadius: 14, padding: '12px 14px', boxShadow: 'var(--shadow-paper)',
+                      textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+                    },
+                  },
+                    html('div', { style: { flex: 1 } },
+                      html('div', { style: { fontWeight: 800, fontSize: 14 } }, s.profile.name || s.profile.email || 'Alumno'),
+                      html('div', { style: { fontSize: 12, color: 'var(--ink-soft)', fontWeight: 600, marginTop: 2 } },
+                        '📅 ' + fmtDate(s.profile.last_seen) + ' · 🔥 ' + (s.profile.streak_days || 0) + ' días'
+                      ),
+                    ),
+                    html('div', { style: { textAlign: 'right' } },
+                      html('div', { style: { fontWeight: 900, fontSize: 20, color: s.avgPercent >= 80 ? 'var(--jade)' : s.avgPercent >= 50 ? 'var(--gold)' : 'var(--lacquer)' } }, s.avgPercent + '%'),
+                      html('div', { style: { fontSize: 11, color: 'var(--ink-soft)', fontWeight: 600 } }, 'promedio'),
+                    ),
+                    html('span', { style: { fontSize: 14, color: 'var(--ink-soft)' } }, '›'),
+                  );
+                })
+              ),
+
+              // Progreso promedio de la clase por lección
+              (() => {
+                const lids = [...new Set(students.flatMap(s => s.progress.map(p => p.lesson_id)))].sort();
+                if (lids.length === 0) return null;
+                return html('div', { style: { marginTop: 20 } },
+                  html('label', null, 'Promedio de la clase por lección'),
+                  html('div', { style: { marginTop: 10 } },
+                    html(BarChart, {
+                      items: lids.map(lid => {
+                        const label = lid === '9' ? 'Países' : lid === '10' ? 'Números' : 'Lec. ' + lid;
+                        const percs = students.map(s => {
+                          const rows = s.progress.filter(p => p.lesson_id === lid);
+                          return rows.length ? Math.max(...rows.map(r => r.percent)) : 0;
+                        });
+                        return { label, value: Math.round(percs.reduce((a, b) => a + b, 0) / percs.length) };
+                      }),
+                    }),
+                  ),
+                );
+              })(),
+            )
+      ),
+
+      // ── Tab: Palabras difíciles de la clase ───────────────────────────────
+      !loading && tab === 'words' && (
+        classWordErrors.length === 0
+          ? html('p', { className: 'admin-note' }, 'Sin datos de errores todavía. Se irán acumulando a medida que los alumnos practiquen.')
+          : html(React.Fragment, null,
+              html('p', { className: 'admin-note', style: { marginBottom: 14 } },
+                'Palabras que más errores acumulan en toda la clase. Útil para enfocarse en la próxima clase.'
+              ),
+              html('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                classWordErrors.map((e, i) => html('div', {
+                  key: i,
+                  style: { background: '#fff', borderRadius: 12, padding: '10px 14px', boxShadow: 'var(--shadow-paper)', display: 'flex', alignItems: 'center', gap: 12 },
+                },
+                  html('div', { className: 'hanzi-font', style: { fontSize: 30, color: 'var(--lacquer)', minWidth: 44, textAlign: 'center' } }, e.hanzi),
+                  html('div', { style: { flex: 1 } },
+                    html('div', { style: { fontWeight: 700, fontSize: 13 } }, e.pinyin + ' · ' + e.es),
+                    html('div', { style: { fontSize: 12, color: 'var(--ink-soft)', fontWeight: 600, marginTop: 2 } },
+                      e.students + ' ' + (e.students === 1 ? 'alumno' : 'alumnos') + ' · ' + e.total + ' errores en total'
+                    ),
+                  ),
+                  html('div', { style: { fontWeight: 900, fontSize: 18, color: e.total >= 10 ? 'var(--lacquer)' : e.total >= 5 ? 'var(--gold)' : 'var(--ink-soft)' } }, e.total + '×'),
+                ))
+              ),
+            )
+      ),
+
+      // ── Tab: Tareas ───────────────────────────────────────────────────────
+      !loading && tab === 'tasks' && html(React.Fragment, null,
+
+        html('div', { style: { display: 'flex', gap: 8, marginBottom: 14 } },
+          [{ id: 'list', label: '📋 Ver tareas' }, { id: 'new', label: '➕ Nueva tarea' }].map(t =>
+            html('button', {
+              key: t.id, onClick: () => setTaskTab(t.id),
+              style: {
+                flex: 1, padding: '8px 0', borderRadius: 10, border: '2px solid',
+                borderColor: taskTab === t.id ? 'var(--jade)' : 'var(--paper-deep)',
+                background: taskTab === t.id ? 'var(--jade-light)' : '#fff',
+                fontWeight: 700, fontSize: 13, cursor: 'pointer',
+              },
+            }, t.label)
+          )
+        ),
+
+        taskTab === 'list' && (
+          tasks.length === 0
+            ? html('p', { className: 'admin-note' }, 'No hay tareas asignadas para esta clase.')
+            : html('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+                tasks.map(t => html('div', {
+                  key: t.id,
+                  style: { background: '#fff', borderRadius: 12, padding: '12px 14px', boxShadow: 'var(--shadow-paper)' },
+                },
+                  html('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' } },
+                    html('div', { style: { fontWeight: 800, fontSize: 14 } }, t.title),
+                    html('button', {
+                      onClick: () => handleDeleteTask(t.id),
+                      style: { background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--lacquer)', padding: '0 4px' },
+                    }, '🗑'),
+                  ),
+                  t.description && html('div', { style: { fontSize: 13, color: 'var(--ink-soft)', marginTop: 4 } }, t.description),
+                  t.due_date && html('div', { style: { fontSize: 12, fontWeight: 700, color: 'var(--jade-dark)', marginTop: 6 } },
+                    '⏰ ' + new Date(t.due_date + 'T12:00').toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })
+                  ),
+                ))
+              )
+        ),
+
+        taskTab === 'new' && html('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          html('input', {
+            className: 'admin-input',
+            placeholder: 'Título de la tarea *',
+            value: newTask.title,
+            onChange: e => setNewTask(prev => ({ ...prev, title: e.target.value })),
+          }),
+          html('input', {
+            className: 'admin-input',
+            placeholder: 'Descripción (opcional)',
+            value: newTask.description,
+            onChange: e => setNewTask(prev => ({ ...prev, description: e.target.value })),
+          }),
+          html('label', { style: { fontSize: 12, fontWeight: 700, color: 'var(--ink-soft)' } }, 'Fecha límite'),
+          html('input', {
+            className: 'admin-input',
+            type: 'date',
+            value: newTask.due_date,
+            onChange: e => setNewTask(prev => ({ ...prev, due_date: e.target.value })),
+          }),
+          html('button', {
+            className: 'primary-btn',
+            onClick: handleCreateTask,
+            disabled: !newTask.title.trim(),
+          }, '📋 Crear tarea'),
+        ),
+      ),
+    ),
+  );
+}
+
 // ----------------- App -----------------
 function App() {
   const [vocab, setVocab] = useState(loadVocab);
@@ -1449,7 +1832,7 @@ function App() {
   useEffect(() => {
     if (!session) { setProfile(undefined); return; }
     setProfile(undefined);
-    db.from('profiles').select('id,email,name,role').eq('id', session.user.id).maybeSingle()
+    db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date').eq('id', session.user.id).maybeSingle()
       .then(({ data }) => setProfile(data || null));
   }, [session]);
 
@@ -1461,6 +1844,48 @@ function App() {
     setSession(null);
     setProfile(undefined);
   };
+
+  // ── Estado extra: clase, tareas y errores de palabras ──
+  const [studentClassId, setStudentClassId] = useState(null);
+  const [assignments, setAssignments] = useState([]);
+  const [wordErrorsMap, setWordErrorsMap] = useState({});
+
+  // Actualizar racha y last_seen en Supabase al entrar
+  useEffect(() => {
+    if (!studentId) return;
+    db.rpc('update_streak').then(({ error }) => {
+      if (!error) {
+        db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date')
+          .eq('id', studentId).maybeSingle()
+          .then(({ data }) => { if (data) setProfile(data); });
+      }
+    });
+  }, [studentId]);
+
+  // Cargar clase, tareas asignadas y mapa de errores por palabra
+  useEffect(() => {
+    if (!studentId) { setStudentClassId(null); setAssignments([]); setWordErrorsMap({}); return; }
+    db.from('class_members').select('class_id').eq('student_id', studentId).maybeSingle()
+      .then(({ data }) => {
+        if (data && data.class_id) {
+          setStudentClassId(data.class_id);
+          const today = new Date().toISOString().slice(0, 10);
+          db.from('assignments').select('id,title,description,lesson_ids,due_date')
+            .eq('class_id', data.class_id).gte('due_date', today)
+            .order('due_date').limit(3)
+            .then(({ data: asgn }) => setAssignments(asgn || []));
+        }
+      });
+    db.from('word_errors').select('hanzi,error_count,last_error,last_correct')
+      .eq('student_id', studentId)
+      .then(({ data }) => {
+        if (data) {
+          const map = {};
+          data.forEach(e => { map[e.hanzi] = e; });
+          setWordErrorsMap(map);
+        }
+      });
+  }, [studentId]);
 
   // --- Progreso: al loguearse, traer de Supabase y fusionar con la copia local ---
   useEffect(() => {
@@ -1511,6 +1936,16 @@ function App() {
           percent: newPercent, missed: missed || [],
           updated_at: new Date().toISOString(),
         }).then(() => {});
+        // Registrar errores de palabras para repaso inteligente
+        (missed || []).forEach(w => {
+          if (w && w.hanzi) {
+            db.rpc('record_word_error', { p_hanzi: w.hanzi, p_pinyin: w.pinyin || '', p_es: w.es || '' }).then(() => {});
+            setWordErrorsMap(prev => {
+              const cur = prev[w.hanzi] || { error_count: 0 };
+              return { ...prev, [w.hanzi]: { ...cur, error_count: (cur.error_count || 0) + 1, last_error: new Date().toISOString() } };
+            });
+          }
+        });
       }
       return next;
     });
@@ -1549,6 +1984,8 @@ function App() {
       onDownload: () => downloadResumen(vocab, progress, lessons, playerName),
       playerName,
       onChangeName: handleSignOut,
+      streak: profile ? (profile.streak_days || 0) : 0,
+      assignments,
     });
   } else if (screen.name === 'lesson') {
     content = html(LessonMenu, {
@@ -1581,7 +2018,7 @@ function App() {
       onClearResult: () => clearLastResult(screen.lessonId, screen.mode),
     });
   } else if (screen.name === 'refuerzo') {
-    const missedWords = getMissedWords(progress);
+    const missedWords = getSmartMissedWords(progress, wordErrorsMap);
     const allWords = lessons.flatMap(id => vocab[id]);
     content = html(RefuerzoSession, {
       words: missedWords, allWords,
@@ -1596,6 +2033,11 @@ function App() {
         setVocab(newVocab);
         localStorage.setItem(VOCAB_KEY, JSON.stringify(newVocab));
       },
+      onReports: () => setScreen({ name: 'reports' }),
+    });
+  } else if (screen.name === 'reports') {
+    content = html(LaoshiReports, {
+      onBack: () => setScreen({ name: 'admin' }),
     });
   } else if (screen.name === 'prueba') {
     const onPruebaFinish = (percent, missed) => {
@@ -1639,7 +2081,7 @@ function App() {
   if (!profile) {
     return html('div', { className: 'app' }, html(EnrollForm, {
       onEnrolled: () => {
-        db.from('profiles').select('id,email,name,role').eq('id', studentId).maybeSingle()
+        db.from('profiles').select('id,email,name,role,last_seen,streak_days,streak_last_date').eq('id', studentId).maybeSingle()
           .then(({ data }) => setProfile(data || null));
       },
     }));
@@ -1649,7 +2091,8 @@ function App() {
 }
 
 // ----------------- Home -----------------
-function Home({ vocab, lessons, progress, totalWords, totalStars, onSelectLesson, onAdmin, onPrueba, pruebaProgress, onDownload, onRefuerzo, playerName, onChangeName }) {
+function Home({ vocab, lessons, progress, totalWords, totalStars, onSelectLesson, onAdmin, onPrueba, pruebaProgress, onDownload, onRefuerzo, playerName, onChangeName, streak, assignments }) {
+  const regularCount = lessons.filter(id => id !== '9' && id !== '10').length;
   return html(React.Fragment, null,
     html('div', { className: 'topbar' },
       html('div', { className: 'brand' },
@@ -1672,14 +2115,42 @@ function Home({ vocab, lessons, progress, totalWords, totalStars, onSelectLesson
           html('div', { className: 'lbl' }, 'palabras')
         ),
         html('div', { className: 'score-chip' },
-          html('div', { className: 'num' }, lessons.length),
+          html('div', { className: 'num' }, regularCount),
           html('div', { className: 'lbl' }, 'lecciones')
         ),
         html('div', { className: 'score-chip' },
-          html('div', { className: 'num' }, totalStars + '/' + (lessons.length * 3)),
+          html('div', { className: 'num' }, totalStars + '/' + (regularCount * 3)),
           html('div', { className: 'lbl' }, 'estrellas')
         ),
       ),
+
+      streak > 0 && html('div', { style: {
+        background: 'linear-gradient(135deg,#E09A2B,#C07818)', borderRadius: 14,
+        padding: '10px 16px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12,
+      } },
+        html('span', { style: { fontSize: 24 } }, '🔥'),
+        html('div', null,
+          html('div', { style: { fontWeight: 800, fontSize: 15, color: '#fff' } },
+            streak + ' día' + (streak === 1 ? '' : 's') + ' seguido' + (streak === 1 ? '' : 's')
+          ),
+          html('div', { style: { fontSize: 11, color: 'rgba(255,255,255,0.85)', fontWeight: 600 } },
+            '¡Seguí practicando para mantener la racha!'
+          ),
+        ),
+      ),
+
+      assignments && assignments.length > 0 && html('div', { style: {
+        background: 'linear-gradient(135deg,var(--jade),#1A7A50)', borderRadius: 14,
+        padding: '12px 16px', marginBottom: 14, color: '#fff',
+      } },
+        html('div', { style: { fontWeight: 800, fontSize: 13, opacity: 0.9, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' } }, '📋 Tarea de tu laoshi'),
+        html('div', { style: { fontWeight: 800, fontSize: 15 } }, assignments[0].title),
+        assignments[0].description && html('div', { style: { fontSize: 13, opacity: 0.9, marginTop: 3 } }, assignments[0].description),
+        assignments[0].due_date && html('div', { style: { fontSize: 12, opacity: 0.8, marginTop: 4, fontWeight: 700 } },
+          '⏰ Hasta el ' + new Date(assignments[0].due_date + 'T12:00').toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' })
+        ),
+      ),
+
       html('h2', { className: 'section-title' }, 'Elegí una lección'),
       html('div', { className: 'lesson-grid' },
         lessons.filter(id => id !== '9' && id !== '10' && !LESSON_THEMES[id]?.hidden).map(id => {
@@ -2332,6 +2803,22 @@ function getMissedWords(progress) {
   });
 }
 
+// Versión con pesos: prioriza palabras con más errores y errores recientes
+function getSmartMissedWords(progress, wordErrorsMap) {
+  const base = getMissedWords(progress);
+  if (!wordErrorsMap || Object.keys(wordErrorsMap).length === 0) return base;
+  const now = Date.now();
+  return base.map(w => {
+    const err = wordErrorsMap[w.hanzi];
+    if (!err) return { ...w, _score: 1 };
+    const daysSinceError   = err.last_error   ? (now - new Date(err.last_error).getTime())   / 86400000 : 30;
+    const daysSinceCorrect = err.last_correct ? (now - new Date(err.last_correct).getTime()) / 86400000 : 999;
+    const recency      = daysSinceError < 1 ? 2.0 : daysSinceError < 3 ? 1.5 : daysSinceError < 7 ? 1.1 : 0.8;
+    const correctBonus = daysSinceCorrect < 1 ? 0.2 : daysSinceCorrect < 3 ? 0.5 : 1.0;
+    return { ...w, _score: (err.error_count || 1) * recency * correctBonus };
+  }).sort((a, b) => b._score - a._score);
+}
+
 // ----------------- Refuerzo: Tarjetas de estudio -----------------
 function StudyCardsPhase({ words, onDone, onBack }) {
   const [deck] = useState(() => shuffle([...words]));
@@ -2609,7 +3096,7 @@ function supabaseRowsToVocab(rows) {
   return vocab;
 }
 
-function AdminPanel({ vocab, onBack, onVocabUpdate }) {
+function AdminPanel({ vocab, onBack, onVocabUpdate, onReports }) {
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
   const [role, setRole] = useState(null);
@@ -2983,7 +3470,7 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
       html('div', null,
         html('label', null, 'Vocabulario actual'),
         html('p', { className: 'admin-note', style: { marginTop: 6 } },
-          totalWords + ' palabras en ' + Object.keys(vocab).length + ' lecciones.'
+          totalWords + ' palabras en ' + Object.keys(vocab).filter(id => id !== '9' && id !== '10').length + ' lecciones + 2 módulos especiales.'
         )
       ),
 
@@ -2994,6 +3481,12 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
               html('span', { style: { fontSize: 13, fontWeight: 700, color: 'var(--jade-dark)' } }, (isAdmin ? '🔓 Admin: ' : '🏫 Laoshi: ') + session.user.email),
               html('button', { className: 'secondary-btn', style: { margin: 0, padding: '6px 14px', fontSize: 13 }, onClick: handleLogout }, 'Cerrar sesión'),
             ),
+
+            html('button', {
+              className: 'primary-btn',
+              style: { marginTop: 8, width: '100%' },
+              onClick: onReports,
+            }, '📊 Ver reportes de mis clases'),
 
             // ── Mis clases ──
             html('div', null,
@@ -3069,21 +3562,6 @@ function AdminPanel({ vocab, onBack, onVocabUpdate }) {
                 onClick: handleCsvUpload,
                 disabled: uploading || !csvFile,
               }, uploading ? '⏳ Subiendo lecciones...' : '➕ Subir a Supabase para todos'),
-            ),
-
-            html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '8px 0' } }),
-
-            // ── Sincronizar lecciones integradas ──
-            html('div', null,
-              html('label', null, '☁️ Sincronizar lecciones integradas'),
-              html('p', { className: 'admin-note', style: { margin: '6px 0 10px' } },
-                'Sube las lecciones 5 a 10 (campus, clima, presentaciones, familia, países y números) a Supabase para que sean administrables desde aquí.'
-              ),
-              html('button', {
-                className: 'secondary-btn',
-                onClick: handleSeedDefaults,
-                disabled: uploading,
-              }, uploading ? '⏳ Sincronizando...' : '☁️ Sincronizar a Supabase'),
             ),
 
             html('hr', { style: { border: 'none', borderTop: '1px solid var(--paper-deep)', margin: '8px 0' } }),
